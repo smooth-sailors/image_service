@@ -1,34 +1,43 @@
-# Image Microservice (DB-free, REST API)
+# Image Microservice (DB-Free, REST API)
 
-A lightweight image microservice that:
+A lightweight FastAPI-based image microservice that:
+
 - Accepts image uploads per **project**
-- Generates and serves **original**, **medium**, and **thumbnail** sizes
-- Stores images on disk (no database)
-- Tracks per-project metadata in `meta.json`
-- Uses the rule: **first uploaded image becomes the project thumbnail/cover**
+- Generates and stores:
+  - Original
+  - Medium
+  - Thumbnail
+- Uses filesystem storage only (no database)
+- Maintains project metadata in `meta.json`
+- Automatically sets the **first uploaded image as the project thumbnail (cover)**
+
+This replaces the original text-file polling pipeline with a proper REST API.
 
 ---
 
-## Features
+# Table of Contents
 
-- **Upload** images via multipart form-data
-- **List** all images for a project
-- **Serve** project thumbnail (primary cover image)
-- **Serve** any image in original/medium/thumb
-- **Delete** an image (auto-updates primary if needed)
-- **Set primary** cover image explicitly (optional)
+- Requirements
+- Installation
+- Running the Service
+- Storage Structure
+- API Endpoints
+- Integration Examples
+- Frontend Usage Patterns
+- Limitations & Scaling Notes
 
 ---
 
-## Requirements
+# Requirements
 
-- Python 3.10+ recommended
+- Python 3.10+
 - Packages:
-  - `fastapi`
-  - `uvicorn`
-  - `pillow`
-  - `python-multipart`
+  - fastapi
+  - uvicorn
+  - pillow
+  - python-multipart
 
 Install:
+
 ```bash
 pip install fastapi uvicorn pillow python-multipart
