@@ -1,0 +1,13 @@
+# Virtual environment
+.venv/
+
+# JetBrains
+.idea/
+
+# Python
+__pycache__/
+*.pyc
+
+# OS
+.DS_Store
+Thumbs.db
