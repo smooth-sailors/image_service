@@ -1,9 +1,13 @@
 """
-Image Microservice (DB-free)
+Image Microservice (DB-free, multi-user safe)
 - REST API for uploading images to a per-project directory
 - Generates original / medium / thumbnail / game(50x50)
 - Uses storage/projects/<project_id>/meta.json as lightweight metadata store
 - First uploaded image becomes the project's primary thumbnail (cover)
+
+Concurrency:
+- Uses a per-project FILE LOCK (meta.lock) so concurrent users AND multiple server
+  processes/workers won't corrupt meta.json or race primary selection.
 """
 
 from __future__ import annotations
@@ -11,7 +15,6 @@ from __future__ import annotations
 import json
 import os
 import uuid
-import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
@@ -19,30 +22,25 @@ from typing import Any, Dict, List, Literal, Optional
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from PIL import Image
+from filelock import FileLock, Timeout
 
 # -----------------------------
 # Config
 # -----------------------------
-app = FastAPI(title="Image Microservice (DB-free)")
+app = FastAPI(title="Image Microservice (DB-free, multi-user safe)")
 
 STORAGE_ROOT = Path("storage/projects")
 
-# Resized targets (tweak freely)
 MEDIUM_MAX = (1600, 1600)
 THUMB_MAX = (400, 400)
-
-# NEW: required game image size
 GAME_IMG = (50, 50)
 
-# JPEG output tuning
 JPEG_QUALITY_ORIGINAL = 92
 JPEG_QUALITY_DERIVED = 85
 
-# In-process lock (good enough for a single uvicorn worker).
-# If you run multiple workers, consider file locks or a DB later.
-_meta_lock = threading.Lock()
+# How long to wait for a project lock before failing (seconds)
+LOCK_TIMEOUT_SECS = 15
 
-# Allowed image sizes for the API
 ImageSize = Literal["original", "medium", "thumb", "game"]
 
 
@@ -54,12 +52,17 @@ def _project_base(project_id: str) -> Path:
     (base / "original").mkdir(parents=True, exist_ok=True)
     (base / "medium").mkdir(parents=True, exist_ok=True)
     (base / "thumb").mkdir(parents=True, exist_ok=True)
-    (base / "game").mkdir(parents=True, exist_ok=True)  # NEW
+    (base / "game").mkdir(parents=True, exist_ok=True)
     return base
 
 
 def _meta_path(project_id: str) -> Path:
     return _project_base(project_id) / "meta.json"
+
+
+def _lock_path(project_id: str) -> Path:
+    # Per-project lock file so different projects don't block each other
+    return _project_base(project_id) / "meta.lock"
 
 
 def _paths_for(project_id: str, image_id: str, ext: str = "jpg") -> Dict[str, Path]:
@@ -69,7 +72,7 @@ def _paths_for(project_id: str, image_id: str, ext: str = "jpg") -> Dict[str, Pa
         "original": base / "original" / filename,
         "medium": base / "medium" / filename,
         "thumb": base / "thumb" / filename,
-        "game": base / "game" / filename,  # NEW
+        "game": base / "game" / filename,
     }
 
 
@@ -81,18 +84,13 @@ def _utc_now_iso() -> str:
 # Helpers: meta.json read/write
 # -----------------------------
 def _default_meta(project_id: str) -> Dict[str, Any]:
-    return {
-        "project_id": project_id,
-        "primary_image_id": None,  # set on first upload
-        "images": [],              # list of {id, ext, created_at}
-    }
+    return {"project_id": project_id, "primary_image_id": None, "images": []}
 
 
 def _read_meta(project_id: str) -> Dict[str, Any]:
     mp = _meta_path(project_id)
     if not mp.exists():
         return _default_meta(project_id)
-
     try:
         return json.loads(mp.read_text(encoding="utf-8"))
     except Exception as e:
@@ -120,6 +118,17 @@ def _find_image_in_meta(meta: Dict[str, Any], image_id: str) -> Optional[Dict[st
     return None
 
 
+def _with_project_lock(project_id: str):
+    """
+    Context manager for per-project lock. Ensures cross-process safety.
+    """
+    lock = FileLock(str(_lock_path(project_id)))
+    try:
+        return lock.acquire(timeout=LOCK_TIMEOUT_SECS)
+    except Timeout:
+        raise HTTPException(status_code=503, detail="Project is busy. Try again in a moment.")
+
+
 # -----------------------------
 # Helpers: image processing
 # -----------------------------
@@ -130,9 +139,7 @@ def _save_as_jpeg(src_path: Path, dest_path: Path, quality: int) -> None:
 
 
 def _save_resized(src_path: Path, dest_path: Path, max_size: tuple[int, int], quality: int) -> None:
-    """
-    Resizes to fit within max_size while preserving aspect ratio (thumbnail behavior).
-    """
+    # Fit within max_size, preserve aspect ratio
     with Image.open(src_path) as im:
         im = im.convert("RGB")
         im.thumbnail(max_size)
@@ -140,24 +147,15 @@ def _save_resized(src_path: Path, dest_path: Path, max_size: tuple[int, int], qu
 
 
 def _save_fixed_square(src_path: Path, dest_path: Path, size: tuple[int, int], quality: int) -> None:
-    """
-    Produces an exact-size image (e.g. 50x50) by center-cropping to square then resizing.
-    This is usually what you want for strict icon requirements.
-    """
+    # Exact WxH: center-crop square then resize
     target_w, target_h = size
     with Image.open(src_path) as im:
         im = im.convert("RGB")
         w, h = im.size
-
-        # Center-crop to square first
         side = min(w, h)
         left = (w - side) // 2
         top = (h - side) // 2
-        right = left + side
-        bottom = top + side
-        im = im.crop((left, top, right, bottom))
-
-        # Resize to exact target
+        im = im.crop((left, top, left + side, top + side))
         im = im.resize((target_w, target_h))
         im.save(dest_path, format="JPEG", quality=quality, optimize=True)
 
@@ -172,29 +170,33 @@ async def upload_image(project_id: str, file: UploadFile = File(...)) -> Dict[st
 
     image_id = uuid.uuid4().hex
     ext = "jpg"
-
-    # Read meta + decide if this becomes primary (first upload wins)
-    with _meta_lock:
-        meta = _read_meta(project_id)
-        _ = len(meta["images"]) == 0  # kept if you want to use it later
-
-    # Save upload to temp
     paths = _paths_for(project_id, image_id, ext)
     tmp_upload = paths["original"].with_suffix(".upload")
 
+    # We lock the entire operation to avoid:
+    # - two simultaneous "first uploads" both becoming primary
+    # - meta.json write races across processes
+    lock_handle = _with_project_lock(project_id)
     try:
+        meta = _read_meta(project_id)
+
+        # Write temp upload
         content = await file.read()
         if not content:
             raise HTTPException(status_code=400, detail="Empty upload.")
         tmp_upload.write_bytes(content)
 
-        # Convert to jpg originals + derived sizes
+        # Convert + generate sizes
         _save_as_jpeg(tmp_upload, paths["original"], quality=JPEG_QUALITY_ORIGINAL)
         _save_resized(paths["original"], paths["medium"], MEDIUM_MAX, quality=JPEG_QUALITY_DERIVED)
         _save_resized(paths["original"], paths["thumb"], THUMB_MAX, quality=JPEG_QUALITY_DERIVED)
-
-        # NEW: exact-size 50x50 for game images
         _save_fixed_square(paths["original"], paths["game"], GAME_IMG, quality=JPEG_QUALITY_DERIVED)
+
+        # Update meta
+        meta["images"].append({"id": image_id, "ext": ext, "created_at": _utc_now_iso()})
+        if meta.get("primary_image_id") is None:
+            meta["primary_image_id"] = image_id
+        _write_meta(project_id, meta)
 
     except HTTPException:
         raise
@@ -202,15 +204,8 @@ async def upload_image(project_id: str, file: UploadFile = File(...)) -> Dict[st
         raise HTTPException(status_code=400, detail=f"Invalid or unsupported image file: {e}")
     finally:
         tmp_upload.unlink(missing_ok=True)
-
-    # Update meta.json
-    with _meta_lock:
-        meta = _read_meta(project_id)  # re-read in case something changed
-        meta["images"].append({"id": image_id, "ext": ext, "created_at": _utc_now_iso()})
-        if meta.get("primary_image_id") is None:
-            # Enforce your rule: first uploaded image is the primary thumbnail
-            meta["primary_image_id"] = image_id
-        _write_meta(project_id, meta)
+        # release file lock
+        lock_handle.release()
 
     return {
         "image_id": image_id,
@@ -220,7 +215,7 @@ async def upload_image(project_id: str, file: UploadFile = File(...)) -> Dict[st
             "original": f"/projects/{project_id}/images/{image_id}?size=original",
             "medium": f"/projects/{project_id}/images/{image_id}?size=medium",
             "thumb": f"/projects/{project_id}/images/{image_id}?size=thumb",
-            "game": f"/projects/{project_id}/images/{image_id}?size=game",  # NEW
+            "game": f"/projects/{project_id}/images/{image_id}?size=game",
         },
     }
 
@@ -230,8 +225,11 @@ async def upload_image(project_id: str, file: UploadFile = File(...)) -> Dict[st
 # -----------------------------
 @app.get("/projects/{project_id}/images")
 def list_images(project_id: str) -> List[Dict[str, Any]]:
-    with _meta_lock:
+    lock_handle = _with_project_lock(project_id)
+    try:
         meta = _read_meta(project_id)
+    finally:
+        lock_handle.release()
 
     primary = meta.get("primary_image_id")
     out: List[Dict[str, Any]] = []
@@ -246,7 +244,7 @@ def list_images(project_id: str) -> List[Dict[str, Any]]:
                     "original": f"/projects/{project_id}/images/{image_id}?size=original",
                     "medium": f"/projects/{project_id}/images/{image_id}?size=medium",
                     "thumb": f"/projects/{project_id}/images/{image_id}?size=thumb",
-                    "game": f"/projects/{project_id}/images/{image_id}?size=game",  # NEW
+                    "game": f"/projects/{project_id}/images/{image_id}?size=game",
                 },
             }
         )
@@ -254,60 +252,58 @@ def list_images(project_id: str) -> List[Dict[str, Any]]:
 
 
 # -----------------------------
-# API: Serve project thumbnail (primary image thumb)
+# API: Serve project thumbnail
 # -----------------------------
 @app.get("/projects/{project_id}/thumbnail")
 def project_thumbnail(project_id: str) -> FileResponse:
-    with _meta_lock:
+    lock_handle = _with_project_lock(project_id)
+    try:
         meta = _read_meta(project_id)
-
-    primary = meta.get("primary_image_id")
-    if not primary:
-        raise HTTPException(status_code=404, detail="Project has no images yet.")
-
-    img = _find_image_in_meta(meta, primary)
-    if not img:
-        raise HTTPException(status_code=404, detail="Primary image metadata missing.")
-
-    paths = _paths_for(project_id, primary, img.get("ext", "jpg"))
-    thumb_path = paths["thumb"]
-    if not thumb_path.exists():
-        raise HTTPException(status_code=404, detail="Thumbnail file missing on disk.")
+        primary = meta.get("primary_image_id")
+        if not primary:
+            raise HTTPException(status_code=404, detail="Project has no images yet.")
+        img = _find_image_in_meta(meta, primary)
+        if not img:
+            raise HTTPException(status_code=404, detail="Primary image metadata missing.")
+        paths = _paths_for(project_id, primary, img.get("ext", "jpg"))
+        thumb_path = paths["thumb"]
+        if not thumb_path.exists():
+            raise HTTPException(status_code=404, detail="Thumbnail file missing on disk.")
+    finally:
+        lock_handle.release()
 
     return FileResponse(thumb_path, media_type="image/jpeg")
 
 
 # -----------------------------
-# API: Serve a specific image size (project-scoped)
+# API: Serve a specific image size
 # -----------------------------
 @app.get("/projects/{project_id}/images/{image_id}")
-def get_project_image(
-    project_id: str,
-    image_id: str,
-    size: ImageSize = "original",
-) -> FileResponse:
-    with _meta_lock:
+def get_project_image(project_id: str, image_id: str, size: ImageSize = "original") -> FileResponse:
+    lock_handle = _with_project_lock(project_id)
+    try:
         meta = _read_meta(project_id)
+        img = _find_image_in_meta(meta, image_id)
+        if not img:
+            raise HTTPException(status_code=404, detail="Image not found in this project.")
+        paths = _paths_for(project_id, image_id, img.get("ext", "jpg"))
+        p = paths[size]
+        if not p.exists():
+            raise HTTPException(status_code=404, detail=f"{size} image missing on disk.")
+    finally:
+        lock_handle.release()
 
-    img = _find_image_in_meta(meta, image_id)
-    if not img:
-        raise HTTPException(status_code=404, detail="Image not found in this project.")
-
-    paths = _paths_for(project_id, image_id, img.get("ext", "jpg"))
-    p = paths[size]
-    if not p.exists():
-        raise HTTPException(status_code=404, detail=f"{size} image missing on disk.")
     return FileResponse(p, media_type="image/jpeg")
 
 
 # -----------------------------
-# API: Delete image (project-scoped)
+# API: Delete image
 # -----------------------------
 @app.delete("/projects/{project_id}/images/{image_id}")
 def delete_project_image(project_id: str, image_id: str) -> Dict[str, Any]:
-    with _meta_lock:
+    lock_handle = _with_project_lock(project_id)
+    try:
         meta = _read_meta(project_id)
-
         img = _find_image_in_meta(meta, image_id)
         if not img:
             raise HTTPException(status_code=404, detail="Image not found in this project.")
@@ -315,37 +311,39 @@ def delete_project_image(project_id: str, image_id: str) -> Dict[str, Any]:
         ext = img.get("ext", "jpg")
         paths = _paths_for(project_id, image_id, ext)
 
-        # Remove files (if missing, still proceed)
-        for k in ("original", "medium", "thumb", "game"):  # NEW includes game
+        # Remove files
+        for k in ("original", "medium", "thumb", "game"):
             paths[k].unlink(missing_ok=True)
 
-        # Remove from meta
+        # Update meta
         meta["images"] = [x for x in meta["images"] if x.get("id") != image_id]
-
-        # If deleted image was primary, choose new primary as "first uploaded" remaining
         if meta.get("primary_image_id") == image_id:
             meta["primary_image_id"] = meta["images"][0]["id"] if meta["images"] else None
-
         _write_meta(project_id, meta)
 
-    return {
-        "ok": True,
-        "project_id": project_id,
-        "deleted_image_id": image_id,
-        "new_primary": meta.get("primary_image_id"),
-    }
+        return {
+            "ok": True,
+            "project_id": project_id,
+            "deleted_image_id": image_id,
+            "new_primary": meta.get("primary_image_id"),
+        }
+    finally:
+        lock_handle.release()
 
 
 # -----------------------------
-# Optional: Set primary (cover) explicitly
+# API: Set primary image
 # -----------------------------
 @app.put("/projects/{project_id}/primary/{image_id}")
 def set_primary(project_id: str, image_id: str) -> Dict[str, Any]:
-    with _meta_lock:
+    lock_handle = _with_project_lock(project_id)
+    try:
         meta = _read_meta(project_id)
         img = _find_image_in_meta(meta, image_id)
         if not img:
             raise HTTPException(status_code=404, detail="Image not found in this project.")
         meta["primary_image_id"] = image_id
         _write_meta(project_id, meta)
-    return {"ok": True, "project_id": project_id, "primary_image_id": image_id}
+        return {"ok": True, "project_id": project_id, "primary_image_id": image_id}
+    finally:
+        lock_handle.release()

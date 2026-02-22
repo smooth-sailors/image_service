@@ -12,6 +12,9 @@ A lightweight FastAPI image microservice that:
 - Maintains project metadata in `meta.json`
 - Automatically sets the **first uploaded image** as the project thumbnail/cover
 
+Concurrency:
+- Uses a per-project **file lock** (`meta.lock`) so multiple users and multiple server workers/processes can safely upload/delete at the same time without corrupting `meta.json`.
+
 ---
 
 
@@ -24,8 +27,6 @@ A lightweight FastAPI image microservice that:
 - API Endpoints
 - Integration Examples
 - Frontend Usage Patterns
-- Limitations & Scaling Notes
-
 ---
 
 # Requirements
@@ -37,12 +38,13 @@ A lightweight FastAPI image microservice that:
   - uvicorn
   - pillow
   - python-multipart
+  - filelock
 
 # Installation:
 *Clone your repository, then install dependencies:*
 
 ```bash
-pip install fastapi uvicorn pillow python-multipart
+pip install fastapi uvicorn pillow python-multipart filelock
 ```
 No database setup required. 
 
@@ -210,6 +212,19 @@ If the deleted image was primary:
 ## Image Format
 
 All uploads are converted to JPEG for consistency and predictable performance.
+
+# Frontend Usage Patterns
+
+## Collections page:
+
+  - Use GET /projects/{project_id}/thumbnail
+
+## Project detail page:
+
+  - GET /projects/{project_id}/images
+  - Render medium for gallery
+  - Use original for full-size view 
+  - Use game for strict 50×50 UI icons
 
 
 
