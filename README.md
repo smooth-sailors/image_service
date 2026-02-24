@@ -1,6 +1,6 @@
-# Hobby Loggy – Image Microservice
+Image Microservice
 
-This microservice provides DB-free image storage for Hobby Loggy projects.
+This microservice provides DB-free image storage.
 
 It handles image uploads, generates multiple image sizes, and stores lightweight metadata per project using the local filesystem.
 
