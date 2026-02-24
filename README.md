@@ -110,5 +110,8 @@ pillow
 filelock
 python-multipart
 
-<img src="Image Processing Pipeline-2026-02-24-065042.png" width="600">
+<h2>Upload Sequence UML</h2>
+<p align="center">
+  <img src="Image Processing Pipeline-2026-02-24-065042.png" width="700">
+</p>
 
