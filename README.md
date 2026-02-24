@@ -110,5 +110,5 @@ pillow
 filelock
 python-multipart
 
-![Image Service UML](Image Processing Pipeline-2026-02-24-065042.png)
+<img src="Image Processing Pipeline-2026-02-24-065042.png" width="600">
 
