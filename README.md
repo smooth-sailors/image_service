@@ -1,4 +1,4 @@
-# Hobby Loggy – Image Microservice (FastAPI)
+# Hobby Loggy – Image Microservice
 
 This microservice provides DB-free image storage for Hobby Loggy projects.
 
