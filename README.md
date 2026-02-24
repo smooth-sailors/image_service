@@ -90,7 +90,8 @@ You should see:
    python -m pip install -r requirements.txt
 ```   
 ### Run the Service
-```python -m uvicorn imgsrv_api:app --host 127.0.0.1 --port 8001 --reload
+```
+python -m uvicorn imgsrv_api:app --host 127.0.0.1 --port 8001 --reload
 ```   
 
 ### Open:
