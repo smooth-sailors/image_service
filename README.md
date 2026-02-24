@@ -1,230 +1,113 @@
-# Image Microservice (DB-Free, REST API)
+# Hobby Loggy – Image Microservice (FastAPI)
 
-A lightweight FastAPI image microservice that:
+This microservice provides DB-free image storage for Hobby Loggy projects.
 
-- Accepts image uploads per **project**
-- Generates and stores:
-  - `original` (converted to JPEG)
-  - `medium` (max 1600×1600, preserves aspect ratio)
-  - `thumb` (max 400×400, preserves aspect ratio)
-  - `game` (**exact 50×50**, center-cropped square then resized)
-- Stores everything on disk (no database)
-- Maintains project metadata in `meta.json`
-- Automatically sets the **first uploaded image** as the project thumbnail/cover
-
-Concurrency:
-- Uses a per-project **file lock** (`meta.lock`) so multiple users and multiple server workers/processes can safely upload/delete at the same time without corrupting `meta.json`.
+It handles image uploads, generates multiple image sizes, and stores lightweight metadata per project using the local filesystem.
 
 ---
 
+# Overview
 
-# Table of Contents
+This service:
 
-- Requirements
-- Installation
-- Running the Service
-- Storage Structure
-- API Endpoints
-- Integration Examples
-- Frontend Usage Patterns
+- Accepts image uploads via REST API
+- Generates four image sizes:
+  - `original` (high quality JPEG)
+  - `medium` (max 1600x1600)
+  - `thumb` (max 400x400)
+  - `game` (50x50 square crop)
+- Stores metadata in: storage/projects/<project_id>/meta.json
+
+- Automatically sets the first uploaded image as the project's primary image
+- Uses file locking to ensure safe multi-user access
+
 ---
 
-# Requirements
+# Storage Location
 
-- Python 3.10+
-- pip
-- Packages:
-  - fastapi
-  - uvicorn
-  - pillow
-  - python-multipart
-  - filelock
+All files are stored relative to `imgsrv_api.py`: image-service/storage/projects/
 
-# Installation:
-*Clone your repository, then install dependencies:*
 
-```bash
-pip install fastapi uvicorn pillow python-multipart filelock
-```
-No database setup required. 
+Each folder contains a `.jpg` version of the image.
 
-# Running the service
+You do NOT need to manually create these folders — the microservice creates them automatically on first upload.
 
-*From the directory containing imgsrv.py*
-
-```bash
-uvicorn imgsrv:app --reload --port 8001
-```
-
-*Service will be available at*
-```
-http://localhost:8001
-```
-
-*Interactive API docs*
-```
-http://localhost:8001/docs
-```
-
-*OpenAPI schema*
-```
-http://localhost:8001/openapi.json
-```
-
-# Storage Structure
-
-*All files are stored in the filesystem under:*
-```
-storage/projects/<project_id>/
-```
-
-*Example Structure*
-```
-storage/projects/123/
-  meta.json
-  original/abc123.jpg
-  medium/abc123.jpg
-  thumb/abc123.jpg
-  game/abc123.jpg
-```
-
-*Image Sizes*
-
-| Size     | Behavior                                         |
-| -------- | ------------------------------------------------ |
-| original | Converted to JPEG                                |
-| medium   | Resized to fit within 1600×1600                  |
-| thumb    | Resized to fit within 400×400                    |
-| game     | Center-cropped square → resized to exactly 50×50 |
-
-# meta.json Structure
-
-*Each project contains a metadata file:*
-
-```
-{
-  "project_id": "123",
-  "primary_image_id": "abc123",
-  "images": [
-    {
-      "id": "abc123",
-      "ext": "jpg",
-      "created_at": "2026-02-21T19:01:02.123Z"
-    }
-  ]
-}
-```
-
-### Primary Image Rules
-
-- The **first uploaded image** automatically becomes the primary image.
-- The primary image determines:
-  - /projects/{project_id}/thumbnail
+---
 
 # API Endpoints
 
-## Upload Image
+## Health Check
 
-### POST
+GET /health
 
-```
-/projects/{project_id}/images
-```
-### Content-Type
-multipart/form-data
+Response:
 
-### Field Name
-file
-
-### Example
-```
-curl -X POST "http://localhost:8001/projects/123/images" \
-  -F "file=@/path/to/image.jpg
+```json
+{ "ok": true }
 ```
 
-### Response
+Upload Image
+```POST /projects/{project_id}/images
+
+Content-Type: multipart/form-data
+Form field name: file
 ```
+
+Example response:
+
+```json
 {
   "image_id": "abc123",
-  "project_id": "123",
+  "project_id": "demo-project",
   "is_primary": true,
   "urls": {
-    "original": "/projects/123/images/abc123?size=original",
-    "medium": "/projects/123/images/abc123?size=medium",
-    "thumb": "/projects/123/images/abc123?size=thumb",
-    "game": "/projects/123/images/abc123?size=game"
+    "original": "/projects/demo-project/images/abc123?size=original",
+    "medium": "/projects/demo-project/images/abc123?size=medium",
+    "thumb": "/projects/demo-project/images/abc123?size=thumb",
+    "game": "/projects/demo-project/images/abc123?size=game"
   }
 }
 ```
-## List Project Images
 
-### GET
-```
-/projects/{project_id}/images
-```
-Returns all images in upload order, including size, URLs, and primary flag.
+---
 
-## Get Project Thumbnail (Cover Image)
+## Local Development Setup (Windows)
+### Create Virtual Environment
 
-### GET
-```
-/projects/{project_id}/thumbnail
-```
-#### Returns
-```
-image/jpeg
-```
+From inside image-service/:
 
-This serves the *thumb* version of the primary image.
+```python -m venv .venv```
 
-## Get Image by Size
+Activate it:
 
-### GET
-```
-/projects/{project_id}/images/{image_id}?size=original|medium|thumb|game
-```
+```.\.venv\Scripts\Activate.ps1```
 
-### Examples
+You should see:
 
-```
-/projects/123/images/abc123?size=original
-/projects/123/images/abc123?size=medium
-/projects/123/images/abc123?size=thumb
-/projects/123/images/abc123?size=game
-```
+```(.venv) PS ...```
+### Install Dependencies
+```python -m pip install --upgrade pip
+   python -m pip install -r requirements.txt
+```   
+### Run the Service
+```python -m uvicorn imgsrv_api:app --host 127.0.0.1 --port 8001 --reload
+```   
 
-## Delete Image
+### Open:
 
-### Delete
-```
-/projects/{project_id}/images/{image_id}
-```
-If the deleted image was primary:
-  - The next remaining image becomes the primary automatically.
+http://127.0.0.1:8001/docs
 
-## Set Primary Image
+Swagger UI will display all endpoints.
 
-### PUT
-```
-/projects/{project_id}/primary/{image_id}
-```
+### requirements.txt
 
-## Image Format
+The required dependencies are:
 
-All uploads are converted to JPEG for consistency and predictable performance.
-
-# Frontend Usage Patterns
-
-## Collections page:
-
-  - Use GET /projects/{project_id}/thumbnail
-
-## Project detail page:
-
-  - GET /projects/{project_id}/images
-  - Render medium for gallery
-  - Use original for full-size view 
-  - Use game for strict 50×50 UI icons
+fastapi
+uvicorn
+pillow
+filelock
+python-multipart
 
 
 
