@@ -159,6 +159,18 @@ def _save_fixed_square(src_path: Path, dest_path: Path, size: tuple[int, int], q
         im = im.resize((target_w, target_h))
         im.save(dest_path, format="JPEG", quality=quality, optimize=True)
 
+def _save_all_sizes(upload, paths):
+    _save_as_jpeg(upload, paths["original"], quality=JPEG_QUALITY_ORIGINAL)
+    _save_resized(paths["original"], paths["medium"], MEDIUM_MAX, quality=JPEG_QUALITY_DERIVED)
+    _save_resized(paths["original"], paths["thumb"], THUMB_MAX, quality=JPEG_QUALITY_DERIVED)
+    _save_fixed_square(paths["original"], paths["game"], GAME_IMG, quality=JPEG_QUALITY_DERIVED)
+
+def _update_meta(meta, image_id, ext, project_id):
+    meta["images"].append({"id": image_id, "ext": ext, "created_at": _utc_now_iso()})
+    if meta.get("primary_image_id") is None:
+        meta["primary_image_id"] = image_id
+    _write_meta(project_id, meta)
+
 
 # -----------------------------
 # API: Upload
@@ -187,16 +199,10 @@ async def upload_image(project_id: str, file: UploadFile = File(...)) -> Dict[st
         tmp_upload.write_bytes(content)
 
         # Convert + generate sizes
-        _save_as_jpeg(tmp_upload, paths["original"], quality=JPEG_QUALITY_ORIGINAL)
-        _save_resized(paths["original"], paths["medium"], MEDIUM_MAX, quality=JPEG_QUALITY_DERIVED)
-        _save_resized(paths["original"], paths["thumb"], THUMB_MAX, quality=JPEG_QUALITY_DERIVED)
-        _save_fixed_square(paths["original"], paths["game"], GAME_IMG, quality=JPEG_QUALITY_DERIVED)
+        _save_all_sizes(tmp_upload, paths)
 
         # Update meta
-        meta["images"].append({"id": image_id, "ext": ext, "created_at": _utc_now_iso()})
-        if meta.get("primary_image_id") is None:
-            meta["primary_image_id"] = image_id
-        _write_meta(project_id, meta)
+        _update_meta(meta, image_id, ext, project_id)
 
     except HTTPException:
         raise
@@ -219,18 +225,8 @@ async def upload_image(project_id: str, file: UploadFile = File(...)) -> Dict[st
         },
     }
 
-
-# -----------------------------
-# API: List images (project)
-# -----------------------------
-@app.get("/projects/{project_id}/images")
-def list_images(project_id: str) -> List[Dict[str, Any]]:
-    lock_handle = _with_project_lock(project_id)
-    try:
-        meta = _read_meta(project_id)
-    finally:
-        lock_handle.release()
-
+# TODO: give this function a real name
+def _helper_idk(meta, project_id):
     primary = meta.get("primary_image_id")
     out: List[Dict[str, Any]] = []
     for img in meta.get("images", []):
@@ -248,6 +244,21 @@ def list_images(project_id: str) -> List[Dict[str, Any]]:
                 },
             }
         )
+    return out
+
+# -----------------------------
+# API: List images (project)
+# -----------------------------
+@app.get("/projects/{project_id}/images")
+def list_images(project_id: str) -> List[Dict[str, Any]]:
+    lock_handle = _with_project_lock(project_id)
+    try:
+        meta = _read_meta(project_id)
+    finally:
+        lock_handle.release()
+
+    out = _helper_idk(meta, project_id)
+
     return out
 
 
